@@ -107,6 +107,7 @@ export function Config({
   const [customBaseURL, setCustomBaseURL] = useState(getGlobalConfig().customApiEndpoint?.baseURL ?? '');
   const [customApiKey, setCustomApiKey] = useState(getGlobalConfig().customApiEndpoint?.apiKey ?? '');
   const [customModelValue, setCustomModelValue] = useState(getGlobalConfig().customApiEndpoint?.model ?? process.env.ANTHROPIC_MODEL ?? '');
+  const [openAICompatMode, setOpenAICompatMode] = useState(getGlobalConfig().customApiEndpoint?.openaiCompatMode ?? 'chat_completions');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
   const [isSearchMode, setIsSearchMode] = useState(true);
@@ -263,10 +264,39 @@ export function Config({
     });
   }
 
+  const customApiProvider = getGlobalConfig().customApiEndpoint?.provider;
+  const customApiProviderDisplay = customApiProvider === 'openai'
+    ? 'OpenAI-compatible'
+    : customApiProvider === 'gemini'
+      ? 'Gemini API'
+      : customApiProvider === 'anthropic'
+        ? 'Anthropic-compatible'
+        : 'Not set';
+
   // TODO: Add MCP servers
   const settingsItems: Setting[] = [
   // Global settings
   {
+    id: 'customApiProvider',
+    label: `Compatible API provider: ${customApiProviderDisplay}`,
+    value: customApiProviderDisplay,
+    options: ['Anthropic-compatible', 'OpenAI-compatible', 'Gemini API'],
+    type: 'enum' as const,
+    onChange(value: string) {
+      const nextProvider = value === 'OpenAI-compatible' ? 'openai' : value === 'Gemini API' ? 'gemini' : value === 'Anthropic-compatible' ? 'anthropic' : undefined;
+      saveGlobalConfig(current => ({
+        ...current,
+        customApiEndpoint: {
+          ...current.customApiEndpoint,
+          provider: nextProvider,
+          openaiCompatMode: nextProvider === 'openai'
+            ? current.customApiEndpoint?.openaiCompatMode ?? 'chat_completions'
+            : undefined
+        }
+      }));
+      setGlobalConfig(getGlobalConfig());
+    }
+  }, {
     id: 'customApiBaseURL',
     label: `Compatible API Base URL: ${customBaseURL || 'Not set'}`,
     value: customBaseURL || 'Not set',
@@ -314,11 +344,13 @@ export function Config({
     type: 'managedEnum' as const,
     onChange(value: string) {
       const nextValue = value === 'Not set' ? '' : value;
+      const nextSavedModels = nextValue ? [...new Set([...(getGlobalConfig().customApiEndpoint?.savedModels ?? []), nextValue])] : getGlobalConfig().customApiEndpoint?.savedModels;
       saveGlobalConfig(current => ({
         ...current,
         customApiEndpoint: {
           ...current.customApiEndpoint,
-          model: nextValue
+          model: nextValue,
+          savedModels: nextSavedModels
         }
       }));
       if (nextValue) {
@@ -327,7 +359,25 @@ export function Config({
       setCustomModelValue(nextValue);
       setGlobalConfig(getGlobalConfig());
     }
-  },
+  }, ...(customApiProvider === 'openai' ? [{
+    id: 'openAICompatMode',
+    label: `OpenAI compatible mode: ${openAICompatMode === 'responses' ? 'Responses' : 'Chat Completions'}`,
+    value: openAICompatMode,
+    options: ['chat_completions', 'responses'],
+    type: 'enum' as const,
+    onChange(value: string) {
+      const nextValue = value === 'responses' ? 'responses' : 'chat_completions';
+      saveGlobalConfig(current => ({
+        ...current,
+        customApiEndpoint: {
+          ...current.customApiEndpoint,
+          openaiCompatMode: nextValue
+        }
+      }));
+      setOpenAICompatMode(nextValue);
+      setGlobalConfig(getGlobalConfig());
+    }
+  }] : []),
   {
     id: 'autoCompactEnabled',
     label: 'Auto-compact',

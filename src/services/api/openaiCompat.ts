@@ -10,7 +10,7 @@ import type {
 
 type AnyBlock = Record<string, unknown>
 
-type OpenAICompatConfig = {
+export type OpenAICompatConfig = {
   apiKey: string
   baseURL: string
   headers?: Record<string, string>
@@ -26,9 +26,13 @@ type OpenAIToolCall = {
   }
 }
 
+type OpenAIChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
 type OpenAIChatMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content?: string | null
+  content?: string | OpenAIChatContentPart[] | null
   tool_call_id?: string
   tool_calls?: OpenAIToolCall[]
 }
@@ -37,6 +41,8 @@ export type OpenAIChatRequest = {
   model: string
   messages: OpenAIChatMessage[]
   stream?: boolean
+  enable_thinking?: boolean
+  thinking_budget?: number
   temperature?: number
   tools?: Array<{
     type: 'function'
@@ -58,6 +64,7 @@ type OpenAIStreamChunk = {
     delta?: {
       role?: 'assistant'
       content?: string | null
+      reasoning_content?: string | null
       tool_calls?: Array<{
         index?: number
         id?: string
@@ -77,11 +84,11 @@ type OpenAIStreamChunk = {
   }
 }
 
-function joinBaseUrl(baseURL: string, path: string): string {
+export function joinBaseUrl(baseURL: string, path: string): string {
   return `${baseURL.replace(/\/$/, '')}${path}`
 }
 
-function contentToText(content: BetaMessageParam['content']): string {
+export function contentToText(content: BetaMessageParam['content']): string {
   if (typeof content === 'string') return content
   return content
     .map(block => {
@@ -97,13 +104,46 @@ function contentToText(content: BetaMessageParam['content']): string {
     .join('\n')
 }
 
-function toBlocks(content: BetaMessageParam['content']): AnyBlock[] {
+export function toBlocks(content: BetaMessageParam['content']): AnyBlock[] {
   return Array.isArray(content)
     ? (content as unknown as AnyBlock[])
     : [{ type: 'text', text: content }]
 }
 
-function getToolDefinitions(tools?: BetaToolUnion[]): OpenAIChatRequest['tools'] {
+function toDataUrl(mediaType: string, data: string): string {
+  return `data:${mediaType};base64,${data}`
+}
+
+function mapAnthropicUserBlocksToOpenAIContent(
+  blocks: AnyBlock[],
+): OpenAIChatContentPart[] {
+  return blocks.flatMap(block => {
+    if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
+      return [{ type: 'text' as const, text: block.text }]
+    }
+    if (
+      block.type === 'image' &&
+      block.source &&
+      typeof block.source === 'object' &&
+      (block.source as Record<string, unknown>).type === 'base64' &&
+      typeof (block.source as Record<string, unknown>).media_type === 'string' &&
+      typeof (block.source as Record<string, unknown>).data === 'string'
+    ) {
+      return [{
+        type: 'image_url' as const,
+        image_url: {
+          url: toDataUrl(
+            String((block.source as Record<string, unknown>).media_type),
+            String((block.source as Record<string, unknown>).data),
+          ),
+        },
+      }]
+    }
+    return []
+  })
+}
+
+export function getToolDefinitions(tools?: BetaToolUnion[]): OpenAIChatRequest['tools'] {
   if (!tools || tools.length === 0) return undefined
   const mapped = tools.flatMap(tool => {
     const record = tool as unknown as Record<string, unknown>
@@ -130,6 +170,10 @@ export function convertAnthropicRequestToOpenAI(input: {
   tool_choice?: BetaToolChoiceAuto | BetaToolChoiceTool
   temperature?: number
   max_tokens?: number
+  thinking?: {
+    type?: 'enabled' | 'disabled' | 'adaptive'
+    budget_tokens?: number
+  }
 }): OpenAIChatRequest {
   const configuredModel = process.env.ANTHROPIC_MODEL?.trim()
   const targetModel = configuredModel || input.model
@@ -158,10 +202,10 @@ export function convertAnthropicRequestToOpenAI(input: {
         })
       }
 
-      const text = contentToText(
-        blocks.filter(block => block.type !== 'tool_result') as unknown as BetaMessageParam['content'],
+      const userContent = mapAnthropicUserBlocksToOpenAIContent(
+        blocks.filter(block => block.type !== 'tool_result') as AnyBlock[],
       )
-      if (text) messages.push({ role: 'user', content: text })
+      if (userContent.length > 0) messages.push({ role: 'user', content: userContent })
       continue
     }
 
@@ -199,6 +243,12 @@ export function convertAnthropicRequestToOpenAI(input: {
   return {
     model: targetModel,
     messages,
+    enable_thinking:
+      input.thinking?.type === 'enabled' || input.thinking?.type === 'adaptive',
+    ...(input.thinking?.type === 'enabled' &&
+    typeof input.thinking.budget_tokens === 'number'
+      ? { thinking_budget: input.thinking.budget_tokens }
+      : {}),
     temperature: input.temperature,
     max_tokens: input.max_tokens,
     ...(getToolDefinitions(input.tools)
@@ -223,7 +273,7 @@ export async function createOpenAICompatStream(
   signal?: AbortSignal,
 ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
   const response = await (config.fetch ?? globalThis.fetch)(
-    joinBaseUrl(config.baseURL, '/v1/chat/completions'),
+    joinBaseUrl(config.baseURL, '/chat/completions'),
     {
       method: 'POST',
       signal,
@@ -251,14 +301,14 @@ export async function createOpenAICompatStream(
   return response.body.getReader()
 }
 
-function parseSSEChunk(buffer: string): { events: string[]; remainder: string } {
+export function parseSSEChunk(buffer: string): { events: string[]; remainder: string } {
   const normalized = buffer.replace(/\r\n/g, '\n')
   const parts = normalized.split('\n\n')
   const remainder = parts.pop() ?? ''
   return { events: parts, remainder }
 }
 
-function mapFinishReason(reason: string | null | undefined): BetaMessage['stop_reason'] {
+export function mapFinishReason(reason: string | null | undefined): BetaMessage['stop_reason'] {
   if (reason === 'tool_calls') return 'tool_use'
   if (reason === 'length') return 'max_tokens'
   return 'end_turn'
@@ -273,6 +323,8 @@ export async function* createAnthropicStreamFromOpenAI(input: {
   let started = false
   let textStarted = false
   let textContentIndex: number | null = null
+  let thinkingStarted = false
+  let thinkingContentIndex: number | null = null
   let toolIndexByOpenAIIndex = new Map<number, number>()
   let nextContentIndex = 0
   let promptTokens = 0
@@ -335,6 +387,7 @@ export async function* createAnthropicStreamFromOpenAI(input: {
           if (!textStarted) {
             textStarted = true
             textContentIndex = nextContentIndex
+            nextContentIndex += 1
             yield {
               type: 'content_block_start',
               index: textContentIndex,
@@ -356,13 +409,40 @@ export async function* createAnthropicStreamFromOpenAI(input: {
           emittedAnyContent = true
         }
 
+        if (delta?.reasoning_content) {
+          if (!thinkingStarted) {
+            thinkingStarted = true
+            thinkingContentIndex = nextContentIndex
+            nextContentIndex += 1
+            yield {
+              type: 'content_block_start',
+              index: thinkingContentIndex,
+              content_block: {
+                type: 'thinking',
+                thinking: '',
+                signature: '',
+              },
+            } as BetaRawMessageStreamEvent
+          }
+
+          yield {
+            type: 'content_block_delta',
+            index: thinkingContentIndex ?? 0,
+            delta: {
+              type: 'thinking_delta',
+              thinking: delta.reasoning_content,
+            },
+          } as BetaRawMessageStreamEvent
+          emittedAnyContent = true
+        }
+
         for (const toolCall of delta?.tool_calls ?? []) {
           const openAIIndex = toolCall.index ?? 0
           let anthropicIndex = toolIndexByOpenAIIndex.get(openAIIndex)
           if (anthropicIndex === undefined) {
-            anthropicIndex = textStarted ? nextContentIndex + 1 : nextContentIndex
+            anthropicIndex = nextContentIndex
             toolIndexByOpenAIIndex.set(openAIIndex, anthropicIndex)
-            nextContentIndex = Math.max(nextContentIndex, anthropicIndex)
+            nextContentIndex = Math.max(nextContentIndex, anthropicIndex + 1)
             const state = {
               id: toolCall.id ?? `toolu_${openAIIndex}`,
               name: toolCall.function?.name ?? '',
@@ -419,6 +499,13 @@ export async function* createAnthropicStreamFromOpenAI(input: {
             yield {
               type: 'content_block_stop',
               index: textContentIndex,
+            } as BetaRawMessageStreamEvent
+          }
+
+          if (thinkingStarted && thinkingContentIndex !== null) {
+            yield {
+              type: 'content_block_stop',
+              index: thinkingContentIndex,
             } as BetaRawMessageStreamEvent
           }
 

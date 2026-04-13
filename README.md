@@ -2,6 +2,8 @@
 
 > Claude Code 的一个 Fork。不是官方正史，而是平行世界番外篇；不是萌豚整活仓库，而是“认真修、顺手发癫一点点”的工程分支。
 
+> **免责声明**：本项目仅供个人学习与技术研究，不得用于任何商业用途或非法用途。所有原始源码版权归 [Anthropic](https://www.anthropic.com) 所有。
+
 [![Fork](https://img.shields.io/badge/Fork-Claude%20Code-f59e0b)](README.md)
 [![Status](https://img.shields.io/badge/status-restored%20%2B%20modded-10b981)](README.md)
 [![Runtime](https://img.shields.io/badge/runtime-Bun%20%2B%20Node-3b82f6)](README.md)
@@ -258,6 +260,49 @@ doge
 ```bash
 bun run version
 ```
+
+## Buddy 宠物系统用法
+
+这个 Fork 内置了一个名为 [`Buddy`](README.md) 的小企鹅宠物，会显示在输入框旁边，并在部分对话后冒泡吐槽或打气。
+
+常用命令如下：
+
+- 启用 / 唤出 Buddy：
+
+```bash
+/buddy
+```
+
+- 摸摸 Buddy（触发爱心动画）：
+
+```bash
+/buddy pet
+```
+
+- 临时关闭 Buddy（静音，不再显示冒泡）：
+
+```bash
+/buddy mute
+```
+
+- 重新打开 Buddy：
+
+```bash
+/buddy unmute
+```
+
+- 查看命令帮助：
+
+```bash
+/buddy help
+```
+
+补充说明：
+
+- 当前这份 Fork 已默认带一个可用的 Buddy，通常启动后就是开启状态
+- [`/buddy mute`](README.md) 是“关闭显示和冒泡”，不是删除宠物数据
+- [`/buddy unmute`](README.md) 会恢复显示
+- 如果你在聊天里直接提到 `Buddy`，它有时会自己在气泡里回应
 
 ## 说明与免责声明
 
