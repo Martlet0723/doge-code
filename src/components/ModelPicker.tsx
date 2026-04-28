@@ -10,7 +10,7 @@ import { useKeybindings } from '../keybindings/useKeybinding.js';
 import { useAppState, useSetAppState } from '../state/AppState.js';
 import { convertEffortValueToLevel, type EffortLevel, getDefaultEffortForModel, modelSupportsEffort, modelSupportsMaxEffort, modelSupportsNoThinking, resolvePickerEffortPersistence } from '../utils/effort.js';
 import { getDefaultMainLoopModel, type ModelSetting, modelDisplayString, parseUserSpecifiedModel } from '../utils/model/model.js';
-import { getModelOptions } from '../utils/model/modelOptions.js';
+import { getModelOptions, type ModelOption } from '../utils/model/modelOptions.js';
 import { getSettingsForSource, updateSettingsForSource } from '../utils/settings/settings.js';
 import { ConfigurableShortcutHint } from './ConfigurableShortcutHint.js';
 import { Select } from './CustomSelect/index.js';
@@ -21,7 +21,7 @@ import { effortLevelToSymbol } from './EffortIndicator.js';
 export type Props = {
   initial: string | null;
   sessionModel?: ModelSetting;
-  onSelect: (model: string | null, effort: EffortLevel | undefined) => void;
+  onSelect: (model: string | null, effort: EffortLevel | undefined, option?: ModelOption) => void;
   onCancel?: () => void;
   isStandaloneCommand?: boolean;
   showFastModeNotice?: boolean;
@@ -124,7 +124,7 @@ export function ModelPicker(t0) {
   const selectOptions = t5;
   let t6;
   if ($[14] !== initialValue || $[15] !== selectOptions) {
-    t6 = selectOptions.some(_ => _.value === initialValue) ? initialValue : selectOptions[0]?.value ?? undefined;
+    t6 = selectOptions.some(_ => _.value === initialValue || extractModelValue(_.value) === initialValue) ? initialValue : selectOptions[0]?.value ?? undefined;
     $[14] = initialValue;
     $[15] = selectOptions;
     $[16] = t6;
@@ -136,7 +136,7 @@ export function ModelPicker(t0) {
   const hiddenCount = Math.max(0, selectOptions.length - visibleCount);
   let t7;
   if ($[17] !== focusedValue || $[18] !== selectOptions) {
-    t7 = selectOptions.find(opt_1 => opt_1.value === focusedValue)?.label;
+    t7 = selectOptions.find(opt_1 => extractModelValue(opt_1.value) === focusedValue)?.label;
     $[17] = focusedValue;
     $[18] = selectOptions;
     $[19] = t7;
@@ -175,9 +175,10 @@ export function ModelPicker(t0) {
   let t10;
   if ($[26] !== effortValue || $[27] !== hasToggledEffort) {
     t10 = value => {
-      setFocusedValue(value);
+      const fv = extractModelValue(value)
+      setFocusedValue(fv);
       if (!hasToggledEffort && effortValue === undefined) {
-        setEffort(getDefaultEffortLevelForOption(value));
+        setEffort(getDefaultEffortLevelForOption(fv));
       }
     };
     $[26] = effortValue;
@@ -232,8 +233,9 @@ export function ModelPicker(t0) {
       logEvent("tengu_model_command_menu_effort", {
         effort: effort as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
       });
+      const modelValue = extractModelValue(value_0)
       if (!skipSettingsWrite) {
-        const effortLevel = resolvePickerEffortPersistence(effort, getDefaultEffortLevelForOption(value_0), getSettingsForSource("userSettings")?.effortLevel, hasToggledEffort);
+        const effortLevel = resolvePickerEffortPersistence(effort, getDefaultEffortLevelForOption(modelValue), getSettingsForSource("userSettings")?.effortLevel, hasToggledEffort);
         updateSettingsForSource("userSettings", {
           effortLevel: effortLevel === 'none' ? undefined : effortLevel as 'low' | 'medium' | 'high' | 'max' | undefined
         });
@@ -242,13 +244,14 @@ export function ModelPicker(t0) {
           effortValue: effortLevel
         }));
       }
-      const selectedModel = resolveOptionModel(value_0);
+      const selectedModel = resolveOptionModel(modelValue);
       const selectedEffort = hasToggledEffort && selectedModel && modelSupportsEffort(selectedModel) ? effort : undefined;
-      if (value_0 === NO_PREFERENCE) {
-        onSelect(null, selectedEffort);
+      const selectedOption = optionsWithInitial.find(opt => makeOptionKey(opt) === value_0);
+      if (modelValue === NO_PREFERENCE) {
+        onSelect(null, selectedEffort, selectedOption);
         return;
       }
-      onSelect(value_0, selectedEffort);
+      onSelect(modelValue, selectedEffort, selectedOption);
     };
     $[35] = effort;
     $[36] = hasToggledEffort;
@@ -296,11 +299,11 @@ export function ModelPicker(t0) {
   const t20 = onCancel ?? _temp4;
   let t21;
   if ($[49] !== handleFocus || $[50] !== handleSelect || $[51] !== initialFocusValue || $[52] !== initialValue || $[53] !== selectOptions || $[54] !== t20 || $[55] !== visibleCount) {
-    t21 = <Box flexDirection="column"><Select defaultValue={initialValue} defaultFocusValue={initialFocusValue} options={selectOptions} onChange={handleSelect} onFocus={handleFocus} onCancel={t20} visibleOptionCount={visibleCount} /></Box>;
+    t21 = <Box flexDirection="column"><Select defaultValue={initialFocusValue} defaultFocusValue={initialFocusValue} options={selectOptions} onChange={handleSelect} onFocus={handleFocus} onCancel={t20} visibleOptionCount={visibleCount} /></Box>;
     $[49] = handleFocus;
     $[50] = handleSelect;
     $[51] = initialFocusValue;
-    $[52] = initialValue;
+    $[52] = initialFocusValue;
     $[53] = selectOptions;
     $[54] = t20;
     $[55] = visibleCount;
@@ -389,10 +392,19 @@ export function ModelPicker(t0) {
 }
 function _temp4() {}
 function _temp3(opt_0) {
+  const base = opt_0.value === null ? NO_PREFERENCE : opt_0.value
   return {
     ...opt_0,
-    value: opt_0.value === null ? NO_PREFERENCE : opt_0.value
+    value: opt_0.providerId ? `${base}\x00${opt_0.providerId}` : base
   };
+}
+function makeOptionKey(opt) {
+  const base = opt.value === null ? NO_PREFERENCE : opt.value
+  return opt.providerId ? `${base}\x00${opt.providerId}` : base
+}
+function extractModelValue(key) {
+  const sepIdx = key.indexOf('\x00')
+  return sepIdx >= 0 ? key.slice(0, sepIdx) : key
 }
 function _temp2(s_0) {
   return s_0.effortValue;

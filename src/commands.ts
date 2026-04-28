@@ -2,6 +2,7 @@
 import addDir from './commands/add-dir/index.js'
 import addModel from './commands/add-model/index.js'
 import removeModel from './commands/remove-model/index.js'
+import provider from './commands/provider/index.js'
 import autofixPr from './commands/autofix-pr/index.js'
 import backfillSessions from './commands/backfill-sessions/index.js'
 import btw from './commands/btw/index.js'
@@ -174,6 +175,7 @@ import env from './commands/env/index.js'
 import exit from './commands/exit/index.js'
 import exportCommand from './commands/export/index.js'
 import model from './commands/model/index.js'
+import modelSelection from './commands/model-selection/index.js'
 import tag from './commands/tag/index.js'
 import outputStyle from './commands/output-style/index.js'
 import remoteEnv from './commands/remote-env/index.js'
@@ -260,6 +262,7 @@ const COMMANDS = memoize((): Command[] => [
   addDir,
   addModel,
   removeModel,
+  provider,
   advisor,
   agents,
   branch,
@@ -291,6 +294,7 @@ const COMMANDS = memoize((): Command[] => [
   memory,
   mobile,
   model,
+  modelSelection,
   outputStyle,
   remoteEnv,
   plugin,

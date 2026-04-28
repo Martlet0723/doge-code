@@ -13,7 +13,7 @@ import { OAuthService } from '../services/oauth/index.js';
 import { getOauthAccountInfo, validateForceLoginOrg } from '../utils/auth.js';
 import { getGlobalConfig, saveGlobalConfig } from '../utils/config.js';
 import { normalizeApiKeyForConfig } from '../utils/authPortable.js';
-import { readCustomApiStorage, writeCustomApiStorage } from '../utils/customApiStorage.js';
+import { getCurrentCustomApiProviderWithIndex, persistCustomApiProviders, readCurrentCustomApiProvider } from '../utils/customApiStorage.js';
 import { logError } from '../utils/log.js';
 import { getSettings_DEPRECATED } from '../utils/settings/settings.js';
 import { Select } from './CustomSelect/select.js';
@@ -75,10 +75,7 @@ export function ConsoleOAuthFlow({
   const forceLoginMethod = forceLoginMethodProp ?? settings.forceLoginMethod;
   const orgUUID = settings.forceLoginOrgUUID;
   const forcedMethodMessage = forceLoginMethod === 'claudeai' ? 'Login method pre-selected: Subscription Plan (Claude Pro/Max)' : forceLoginMethod === 'console' ? 'Login method pre-selected: API Usage Billing (Anthropic Console)' : null;
-  const persistedCustomApiEndpoint = useMemo(() => ({
-    ...(getGlobalConfig().customApiEndpoint ?? {}),
-    ...readCustomApiStorage()
-  }), []);
+  const persistedCustomApiEndpoint = useMemo(() => readCurrentCustomApiProvider() ?? {}, []);
   const persistedProvider = persistedCustomApiEndpoint.provider ?? 'anthropic';
   const persistedOpenAICompatMode = persistedCustomApiEndpoint.openaiCompatMode ?? 'chat_completions';
   const terminal = useTerminalNotification();
@@ -199,32 +196,41 @@ export function ConsoleOAuthFlow({
     const nextApiKey = customApiKey.trim();
     const nextModel = customModel.trim();
     const normalizedKey = nextApiKey ? normalizeApiKeyForConfig(nextApiKey) : null;
-    const nextSavedModels = nextModel ? [...new Set([...(persistedCustomApiEndpoint.savedModels ?? []), nextModel])] : persistedCustomApiEndpoint.savedModels ?? [];
+    const currentProviderState = getCurrentCustomApiProviderWithIndex();
+    const currentProvider = currentProviderState.provider;
+    const nextSavedModels = nextModel ? [...new Set([...(currentProvider?.savedModels ?? persistedCustomApiEndpoint.savedModels ?? []), nextModel])] : currentProvider?.savedModels ?? persistedCustomApiEndpoint.savedModels ?? [];
     process.env.ANTHROPIC_BASE_URL = nextBaseURL;
     process.env.DOGE_API_KEY = nextApiKey;
     process.env.ANTHROPIC_MODEL = nextModel;
     saveGlobalConfig(current => ({
       ...current,
-      customApiEndpoint: {
-        provider: compatibleApiProvider,
-        openaiCompatMode: compatibleApiProvider === 'openai' ? openAICompatMode : undefined,
-        baseURL: nextBaseURL,
-        apiKey: undefined,
-        model: nextModel,
-        savedModels: nextSavedModels
-      },
       customApiKeyResponses: normalizedKey ? {
         approved: [...new Set([...(current.customApiKeyResponses?.approved ?? []), normalizedKey])],
         rejected: (current.customApiKeyResponses?.rejected ?? []).filter(key => key !== normalizedKey)
       } : current.customApiKeyResponses
     }));
-    writeCustomApiStorage({
-      provider: compatibleApiProvider,
-      openaiCompatMode: compatibleApiProvider === 'openai' ? openAICompatMode : undefined,
-      baseURL: nextBaseURL,
-      apiKey: nextApiKey,
-      model: nextModel,
-      savedModels: nextSavedModels
+    persistCustomApiProviders({
+      currentProviderId: currentProvider?.id,
+      providers: currentProvider ? [
+        ...((getGlobalConfig().customApiProviders ?? []).map(provider => provider.id === currentProvider.id ? {
+          ...provider,
+          provider: compatibleApiProvider,
+          openaiCompatMode: compatibleApiProvider === 'openai' ? openAICompatMode : undefined,
+          baseURL: nextBaseURL,
+          apiKey: nextApiKey,
+          model: nextModel,
+          savedModels: nextSavedModels
+        } : provider))
+      ] : [{
+        id: `provider-1-oauth`,
+        name: 'Provider 1',
+        provider: compatibleApiProvider,
+        openaiCompatMode: compatibleApiProvider === 'openai' ? openAICompatMode : undefined,
+        baseURL: nextBaseURL,
+        apiKey: nextApiKey,
+        model: nextModel,
+        savedModels: nextSavedModels
+      }]
     });
   }, [compatibleApiProvider, customApiKey, customBaseURL, customModel, openAICompatMode, persistedCustomApiEndpoint.savedModels]);
   const handleSubmitCustomConfig = useCallback((value: string) => {
@@ -579,7 +585,7 @@ function OAuthStatusMessage(t0) {
         const label = oauthStatus.step === 'baseURL' ? isOpenAIProvider ? `Enter the ${currentOpenAICompatMode === 'responses' ? 'OpenAI Responses' : 'OpenAI Chat Completions'} compatible base URL:` : isGeminiProvider ? 'Enter the Gemini API base URL:' : 'Enter the Anthropic Messages compatible base URL:' : oauthStatus.step === 'apiKey' ? isOpenAIProvider ? 'Input OpenAI API Key:' : isGeminiProvider ? 'Input Gemini API Key:' : 'Input Anthropic API Key:' : 'Enter the default model name:';
         const value = oauthStatus.step === 'baseURL' ? customBaseURL : oauthStatus.step === 'apiKey' ? customApiKey : customModel;
         const onChange = oauthStatus.step === 'baseURL' ? setCustomBaseURL : oauthStatus.step === 'apiKey' ? setCustomApiKey : setCustomModel;
-        const placeholder = oauthStatus.step === 'baseURL' ? isOpenAIProvider ? 'http(s)://your-openai-compatible-endpoint.example.com' : isGeminiProvider ? 'https://generativelanguage.googleapis.com/v1beta' : 'http(s)://your-anthropic-compatible-endpoint.example.com' : oauthStatus.step === 'apiKey' ? 'sk-...' : isOpenAIProvider ? 'gpt-4o-mini' : isGeminiProvider ? 'gemini-2.5-pro' : 'claude-3-5-sonnet-latest';
+        const placeholder = oauthStatus.step === 'baseURL' ? isOpenAIProvider ? 'http(s)://your-openai-compatible-endpoint.example.com/v1' : isGeminiProvider ? 'https://generativelanguage.googleapis.com/v1beta' : 'http(s)://your-anthropic-compatible-endpoint.example.com' : oauthStatus.step === 'apiKey' ? 'sk-...' : isOpenAIProvider ? 'gpt-4o-mini' : isGeminiProvider ? 'gemini-2.5-pro' : 'claude-3-5-sonnet-latest';
         const mask = oauthStatus.step === 'apiKey' ? '*' : undefined;
         return <Box flexDirection="column" gap={1} marginTop={1}><Text bold={true}>Configure compatible interfaces</Text><Text>{`Current selection: ${currentProviderLabel}`}</Text><Text>{label}</Text><Box flexDirection="row"><TextInput value={value} onChange={onChange} onSubmit={handleSubmitCustomConfig} onIsPastingChange={setIsCustomInputPasting} cursorOffset={cursorOffset} onChangeCursorOffset={setCursorOffset} columns={oauthStatus.step === 'baseURL' ? Math.max(20, textInputColumns - 12) : textInputColumns} focus={true} showCursor={true} placeholder={placeholder} mask={mask} dimColor={oauthStatus.step === 'model' && value.length === 0} />{oauthStatus.step === 'baseURL' ? <Text dimColor={true}>{pathSuffix}</Text> : null}</Box><Text dimColor={true}>{isCustomInputPasting ? 'Press Enter to save the current item and continue.' : 'Press Enter to save the current item and continue.'}</Text></Box>;
       }

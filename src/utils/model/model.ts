@@ -17,6 +17,8 @@ import {
   has1mContext,
   is1mContextDisabled,
   modelSupports1M,
+  parseModelContextSuffix,
+  stripModelContextSuffix,
 } from '../context.js'
 import { isEnvTruthy } from '../envUtils.js'
 import { getModelStrings, resolveOverriddenModel } from './modelStrings.js'
@@ -28,13 +30,28 @@ import { LIGHTNING_BOLT } from '../../constants/figures.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import { type ModelAlias, isModelAlias } from './aliases.js'
 import { capitalize } from '../stringUtils.js'
+import {
+  readCustomApiProvidersStorage,
+  readCustomApiStorage,
+} from '../customApiStorage.js'
 
 export type ModelShortName = string
 export type ModelName = string
 export type ModelSetting = ModelName | ModelAlias | null
 
+type ModelSelectionTier = 'fast' | 'balance' | 'quality'
+
+export type ConfiguredTierModel = {
+  model: ModelSetting
+  providerId?: string
+}
+
 export function getSmallFastModel(): ModelName {
-  return process.env.ANTHROPIC_SMALL_FAST_MODEL || getDefaultHaikuModel()
+  return (
+    process.env.ANTHROPIC_SMALL_FAST_MODEL ||
+    resolveConfiguredTierModel('fast') ||
+    getDefaultHaikuModel()
+  )
 }
 
 export function isNonCustomOpusModel(model: ModelName): boolean {
@@ -155,12 +172,12 @@ export function getRuntimeMainLoopModel(params: {
     permissionMode === 'plan' &&
     !exceeds200kTokens
   ) {
-    return getDefaultOpusModel()
+    return resolveConfiguredTierModel('quality') || getDefaultOpusModel()
   }
 
   // sonnetplan by default
   if (getUserSpecifiedModelSetting() === 'haiku' && permissionMode === 'plan') {
-    return getDefaultSonnetModel()
+    return resolveConfiguredTierModel('balance') || getDefaultSonnetModel()
   }
 
   return mainLoopModel
@@ -205,6 +222,49 @@ export function getDefaultMainLoopModelSetting(): ModelName | ModelAlias {
  */
 export function getDefaultMainLoopModel(): ModelName {
   return parseUserSpecifiedModel(getDefaultMainLoopModelSetting())
+}
+
+export function getConfiguredTierModel(
+  tier: ModelSelectionTier,
+): ConfiguredTierModel | undefined {
+  const settings = getSettings_DEPRECATED() || {}
+  const configuredValue = settings.modelSelection?.[tier]
+  const configuredModel =
+    typeof configuredValue === 'string'
+      ? { model: configuredValue }
+      : configuredValue
+
+  if (!configuredModel?.model || !isModelAllowed(configuredModel.model)) {
+    return undefined
+  }
+  return configuredModel
+}
+
+export function resolveConfiguredTierModel(
+  tier: ModelSelectionTier,
+  contextSuffix: string | null = null,
+  visitedTiers = new Set<ModelSelectionTier>(),
+): ModelName | undefined {
+  if (visitedTiers.has(tier)) {
+    return undefined
+  }
+
+  const configuredModel = getConfiguredTierModel(tier)
+  if (!configuredModel) {
+    return undefined
+  }
+
+  const nextVisitedTiers = new Set(visitedTiers)
+  nextVisitedTiers.add(tier)
+
+  const resolvedModel = parseUserSpecifiedModelInternal(
+    contextSuffix && !parseModelContextSuffix(configuredModel.model)
+      ? `${configuredModel.model}${contextSuffix}`
+      : configuredModel.model,
+    nextVisitedTiers,
+  )
+
+  return isModelAllowed(resolvedModel) ? resolvedModel : undefined
 }
 
 // @[MODEL LAUNCH]: Add a canonical name mapping for the new model below.
@@ -282,6 +342,10 @@ export function getCanonicalName(fullModelName: ModelName): ModelShortName {
   return firstPartyNameToCanonical(resolveOverriddenModel(fullModelName))
 }
 
+export function isClaudeModel(modelId: string): boolean {
+  return getCanonicalName(stripModelContextSuffix(modelId)).includes('claude-')
+}
+
 // @[MODEL LAUNCH]: Update the default model description strings shown to users.
 export function getClaudeAiUserDefaultModelDescription(
   fastMode = false,
@@ -302,6 +366,17 @@ export function renderDefaultModelSetting(
     return 'Opus 4.6 in plan mode, else Sonnet 4.6'
   }
   return renderModelName(parseUserSpecifiedModel(setting))
+}
+
+export function renderActiveModelSetting(setting: ModelSetting | undefined): string {
+  const persistedCustomModel = readCustomApiStorage().model?.trim()
+  if (setting === null && persistedCustomModel) {
+    return persistedCustomModel
+  }
+  const rendered = renderDefaultModelSetting(
+    setting ?? getDefaultMainLoopModelSetting(),
+  )
+  return setting === null ? `${rendered} (default)` : rendered
 }
 
 export function getOpus46PricingSuffix(fastMode: boolean): string {
@@ -347,37 +422,35 @@ export function renderModelSetting(setting: ModelName | ModelAlias): string {
  * if the model is not recognized as a public model.
  */
 export function getPublicModelDisplayName(model: ModelName): string | null {
-  switch (model) {
+  const contextSuffix = parseModelContextSuffix(model)?.suffixText
+  const baseModel = stripModelContextSuffix(model)
+  const suffix = contextSuffix
+    ? ` (${formatContextSuffixForDisplay(contextSuffix)} context)`
+    : ''
+
+  switch (baseModel) {
     case getModelStrings().opus46:
-      return 'Opus 4.6'
-    case getModelStrings().opus46 + '[1m]':
-      return 'Opus 4.6 (1M context)'
+      return `Opus 4.6${suffix}`
     case getModelStrings().opus45:
-      return 'Opus 4.5'
+      return `Opus 4.5${suffix}`
     case getModelStrings().opus41:
-      return 'Opus 4.1'
+      return `Opus 4.1${suffix}`
     case getModelStrings().opus40:
-      return 'Opus 4'
-    case getModelStrings().sonnet46 + '[1m]':
-      return 'Sonnet 4.6 (1M context)'
+      return `Opus 4${suffix}`
     case getModelStrings().sonnet46:
-      return 'Sonnet 4.6'
-    case getModelStrings().sonnet45 + '[1m]':
-      return 'Sonnet 4.5 (1M context)'
+      return `Sonnet 4.6${suffix}`
     case getModelStrings().sonnet45:
-      return 'Sonnet 4.5'
+      return `Sonnet 4.5${suffix}`
     case getModelStrings().sonnet40:
-      return 'Sonnet 4'
-    case getModelStrings().sonnet40 + '[1m]':
-      return 'Sonnet 4 (1M context)'
+      return `Sonnet 4${suffix}`
     case getModelStrings().sonnet37:
-      return 'Sonnet 3.7'
+      return `Sonnet 3.7${suffix}`
     case getModelStrings().sonnet35:
-      return 'Sonnet 3.5'
+      return `Sonnet 3.5${suffix}`
     case getModelStrings().haiku45:
-      return 'Haiku 4.5'
+      return `Haiku 4.5${suffix}`
     case getModelStrings().haiku35:
-      return 'Haiku 3.5'
+      return `Haiku 3.5${suffix}`
     default:
       return null
   }
@@ -401,9 +474,10 @@ export function renderModelName(model: ModelName): string {
     const resolved = parseUserSpecifiedModel(model)
     const antModel = resolveAntModel(model)
     if (antModel) {
-      const baseName = antModel.model.replace(/\[1m\]$/i, '')
+      const parsedSuffix = parseModelContextSuffix(resolved)
+      const baseName = stripModelContextSuffix(antModel.model)
       const masked = maskModelCodename(baseName)
-      const suffix = has1mContext(resolved) ? '[1m]' : ''
+      const suffix = parsedSuffix?.suffixText ?? ''
       return masked + suffix
     }
     if (resolved !== model) {
@@ -445,24 +519,41 @@ export function getPublicModelName(model: ModelName): string {
 export function parseUserSpecifiedModel(
   modelInput: ModelName | ModelAlias,
 ): ModelName {
+  return parseUserSpecifiedModelInternal(modelInput, new Set())
+}
+
+function parseUserSpecifiedModelInternal(
+  modelInput: ModelName | ModelAlias,
+  visitedTiers: Set<ModelSelectionTier>,
+): ModelName {
   const modelInputTrimmed = modelInput.trim()
   const normalizedModel = modelInputTrimmed.toLowerCase()
-
-  const has1mTag = has1mContext(normalizedModel)
-  const modelString = has1mTag
-    ? normalizedModel.replace(/\[1m]$/i, '').trim()
-    : normalizedModel
+  const parsedSuffix = parseModelContextSuffix(normalizedModel)
+  const contextSuffix = parsedSuffix?.suffixText ?? ''
+  const modelString = parsedSuffix?.baseModel ?? normalizedModel
 
   if (isModelAlias(modelString)) {
     switch (modelString) {
       case 'opusplan':
-        return getDefaultSonnetModel() + (has1mTag ? '[1m]' : '') // Sonnet is default, Opus in plan mode
+        return (
+          resolveConfiguredTierModel('balance', contextSuffix, visitedTiers) ||
+          getDefaultSonnetModel() + contextSuffix
+        ) // Sonnet is default, Opus in plan mode
       case 'sonnet':
-        return getDefaultSonnetModel() + (has1mTag ? '[1m]' : '')
+        return (
+          resolveConfiguredTierModel('balance', contextSuffix, visitedTiers) ||
+          getDefaultSonnetModel() + contextSuffix
+        )
       case 'haiku':
-        return getDefaultHaikuModel() + (has1mTag ? '[1m]' : '')
+        return (
+          resolveConfiguredTierModel('fast', contextSuffix, visitedTiers) ||
+          getDefaultHaikuModel() + contextSuffix
+        )
       case 'opus':
-        return getDefaultOpusModel() + (has1mTag ? '[1m]' : '')
+        return (
+          resolveConfiguredTierModel('quality', contextSuffix, visitedTiers) ||
+          getDefaultOpusModel() + contextSuffix
+        )
       case 'best':
         return getBestModel()
       default:
@@ -479,17 +570,13 @@ export function parseUserSpecifiedModel(
     isLegacyOpusFirstParty(modelString) &&
     isLegacyModelRemapEnabled()
   ) {
-    return getDefaultOpusModel() + (has1mTag ? '[1m]' : '')
+    return getDefaultOpusModel() + contextSuffix
   }
 
   if (process.env.USER_TYPE === 'ant') {
-    const has1mAntTag = has1mContext(normalizedModel)
-    const baseAntModel = normalizedModel.replace(/\[1m]$/i, '').trim()
-
-    const antModel = resolveAntModel(baseAntModel)
+    const antModel = resolveAntModel(modelString)
     if (antModel) {
-      const suffix = has1mAntTag ? '[1m]' : ''
-      return antModel.model + suffix
+      return antModel.model + contextSuffix
     }
 
     // Fall through to the alias string if we cannot load the config. The API calls
@@ -498,9 +585,8 @@ export function parseUserSpecifiedModel(
   }
 
   // Preserve original case for custom model names (e.g., Azure Foundry deployment IDs)
-  // Only strip [1m] suffix if present, maintaining case of the base model
-  if (has1mTag) {
-    return modelInputTrimmed.replace(/\[1m\]$/i, '').trim() + '[1m]'
+  if (contextSuffix) {
+    return stripModelContextSuffix(modelInputTrimmed) + contextSuffix
   }
   return modelInputTrimmed
 }
@@ -520,17 +606,50 @@ export function parseUserSpecifiedModel(
  * so the autocompact that follows is correct. Skills that already specify [1m]
  * are left untouched.
  */
+export function getConfiguredProviderIdForModel(
+  model: ModelName,
+): string | undefined {
+  const contextSuffix = parseModelContextSuffix(model)?.suffixText ?? null
+
+  for (const tier of ['fast', 'balance', 'quality'] as const) {
+    const configuredModel = getConfiguredTierModel(tier)
+    if (!configuredModel?.providerId) {
+      continue
+    }
+
+    const resolvedModel = resolveConfiguredTierModel(tier, contextSuffix)
+    if (resolvedModel === model) {
+      return configuredModel.providerId
+    }
+  }
+
+  // Fallback: If no tier matches or the matched tier lacks a providerId (e.g., legacy string configs),
+  // scan custom providers directly to see if this model is associated with one.
+  const allProviders = readCustomApiProvidersStorage().providers ?? []
+  const matchedProvider = allProviders.find(
+    p =>
+      p.model?.trim() === model ||
+      (p.savedModels && p.savedModels.some(s => s.trim() === model)),
+  )
+  if (matchedProvider) {
+    return matchedProvider.id
+  }
+
+  return undefined
+}
+
 export function resolveSkillModelOverride(
   skillModel: string,
   currentModel: string,
 ): string {
-  if (has1mContext(skillModel) || !has1mContext(currentModel)) {
+  const currentSuffix = parseModelContextSuffix(currentModel)?.suffixText
+  if (parseModelContextSuffix(skillModel) || !currentSuffix) {
     return skillModel
   }
   // modelSupports1M matches on canonical IDs ('claude-opus-4-6', 'claude-sonnet-4');
   // a bare 'opus' alias falls through getCanonicalName unmatched. Resolve first.
   if (modelSupports1M(parseUserSpecifiedModel(skillModel))) {
-    return skillModel + '[1m]'
+    return skillModel + currentSuffix
   }
   return skillModel
 }
@@ -567,52 +686,61 @@ export function modelDisplayString(model: ModelSetting): string {
 }
 
 // @[MODEL LAUNCH]: Add a marketing name mapping for the new model below.
+function formatContextSuffixForDisplay(suffix: string): string {
+  return suffix.slice(1, -1).toUpperCase()
+}
+
 export function getMarketingNameForModel(modelId: string): string | undefined {
   if (getAPIProvider() === 'foundry') {
     // deployment ID is user-defined in Foundry, so it may have no relation to the actual model
     return undefined
   }
 
-  const has1m = modelId.toLowerCase().includes('[1m]')
+  const contextSuffix = parseModelContextSuffix(modelId)?.suffixText
   const canonical = getCanonicalName(modelId)
 
+  const withSuffix = (name: string) =>
+    contextSuffix
+      ? `${name} (with ${formatContextSuffixForDisplay(contextSuffix)} context)`
+      : name
+
   if (canonical.includes('claude-opus-4-6')) {
-    return has1m ? 'Opus 4.6 (with 1M context)' : 'Opus 4.6'
+    return withSuffix('Opus 4.6')
   }
   if (canonical.includes('claude-opus-4-5')) {
-    return 'Opus 4.5'
+    return withSuffix('Opus 4.5')
   }
   if (canonical.includes('claude-opus-4-1')) {
-    return 'Opus 4.1'
+    return withSuffix('Opus 4.1')
   }
   if (canonical.includes('claude-opus-4')) {
-    return 'Opus 4'
+    return withSuffix('Opus 4')
   }
   if (canonical.includes('claude-sonnet-4-6')) {
-    return has1m ? 'Sonnet 4.6 (with 1M context)' : 'Sonnet 4.6'
+    return withSuffix('Sonnet 4.6')
   }
   if (canonical.includes('claude-sonnet-4-5')) {
-    return has1m ? 'Sonnet 4.5 (with 1M context)' : 'Sonnet 4.5'
+    return withSuffix('Sonnet 4.5')
   }
   if (canonical.includes('claude-sonnet-4')) {
-    return has1m ? 'Sonnet 4 (with 1M context)' : 'Sonnet 4'
+    return withSuffix('Sonnet 4')
   }
   if (canonical.includes('claude-3-7-sonnet')) {
-    return 'Claude 3.7 Sonnet'
+    return withSuffix('Claude 3.7 Sonnet')
   }
   if (canonical.includes('claude-3-5-sonnet')) {
-    return 'Claude 3.5 Sonnet'
+    return withSuffix('Claude 3.5 Sonnet')
   }
   if (canonical.includes('claude-haiku-4-5')) {
-    return 'Haiku 4.5'
+    return withSuffix('Haiku 4.5')
   }
   if (canonical.includes('claude-3-5-haiku')) {
-    return 'Claude 3.5 Haiku'
+    return withSuffix('Claude 3.5 Haiku')
   }
 
   return undefined
 }
 
 export function normalizeModelStringForAPI(model: string): string {
-  return model.replace(/\[(1|2)m\]/gi, '')
+  return stripModelContextSuffix(model)
 }

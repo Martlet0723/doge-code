@@ -1,4 +1,5 @@
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
+import { stripModelContextSuffix } from '../context.js'
 import { MODEL_ALIASES } from './aliases.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import { getAPIProvider } from './providers.js'
@@ -10,7 +11,7 @@ import {
   AuthenticationError,
 } from '@anthropic-ai/sdk'
 import { getModelStrings } from './modelStrings.js'
-import { getGlobalConfig } from '../config.js'
+import { readCurrentCustomApiProvider } from '../customApiStorage.js'
 
 // Cache valid models to avoid repeated API calls
 const validModelCache = new Map<string, boolean>()
@@ -22,7 +23,7 @@ export async function validateModel(
   model: string,
 ): Promise<{ valid: boolean; error?: string }> {
   const normalizedModel = model.trim()
-  const customBaseURL = getGlobalConfig().customApiEndpoint?.baseURL
+  const customBaseURL = readCurrentCustomApiProvider()?.baseURL
 
   // Empty model is invalid
   if (!normalizedModel) {
@@ -38,7 +39,7 @@ export async function validateModel(
   }
 
   // Check if it's a known alias (these are always valid)
-  const lowerModel = normalizedModel.toLowerCase()
+  const lowerModel = stripModelContextSuffix(normalizedModel).toLowerCase()
   if ((MODEL_ALIASES as readonly string[]).includes(lowerModel)) {
     return { valid: true }
   }

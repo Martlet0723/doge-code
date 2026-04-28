@@ -32,6 +32,7 @@ import {
 } from './model.js'
 import { has1mContext } from '../context.js'
 import { getGlobalConfig } from '../config.js'
+import { formatCustomApiProviderIndex, formatCustomApiProviderType, readCurrentCustomApiProvider, readCustomApiProvidersStorage } from '../customApiStorage.js'
 
 // @[MODEL LAUNCH]: Update all the available and default model option strings below.
 
@@ -40,6 +41,7 @@ export type ModelOption = {
   label: string
   description: string
   descriptionForModel?: string
+  providerId?: string
 }
 
 export function getDefaultOptionForUser(fastMode = false): ModelOption {
@@ -278,12 +280,33 @@ function getOpusPlanOption(): ModelOption {
 // @[MODEL LAUNCH]: Update the model picker lists below to include/reorder options for the new model.
 // Each user tier (ant, Max/Team Premium, Pro/Team Standard/Enterprise, PAYG 1P, PAYG 3P) has its own list.
 function getModelOptionsBase(fastMode = false): ModelOption[] {
+  const currentCustomProvider = readCurrentCustomApiProvider()
+  const allCustomProviders = readCustomApiProvidersStorage().providers ?? []
+  const allProviderOptions = allCustomProviders.flatMap((provider, index) => {
+    const configuredModel = provider.model?.trim()
+    const savedModels = (provider.savedModels ?? []).map(model => model.trim()).filter(Boolean)
+    const orderedModels = [
+      ...(configuredModel ? [configuredModel] : []),
+      ...savedModels.filter(model => model !== configuredModel),
+    ]
+    return orderedModels.map(model => ({
+      value: model,
+      label: model,
+      description: `${provider.name?.trim() || 'Provider'} · ${formatCustomApiProviderIndex(index)} · ${formatCustomApiProviderType(provider.provider)}`,
+      providerId: provider.id,
+    }))
+  })
+
+  if (allProviderOptions.length > 0) {
+    return allProviderOptions
+  }
+
   const customConfiguredModel =
-    getGlobalConfig().customApiEndpoint?.model?.trim() ||
-    process.env.ANTHROPIC_MODEL?.trim()
-  const savedModels = (getGlobalConfig().customApiEndpoint?.savedModels ?? [])
+    currentCustomProvider?.model?.trim() || process.env.ANTHROPIC_MODEL?.trim()
+  const savedModels = (currentCustomProvider?.savedModels ?? [])
     .map(model => model.trim())
     .filter(Boolean)
+  const customModelDescription = currentCustomProvider?.name?.trim() || 'Custom model'
 
   if (customConfiguredModel || savedModels.length > 0) {
     const orderedModels = [
@@ -294,7 +317,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       ...orderedModels.map(model => ({
         value: model,
         label: model,
-        description: 'Custom model',
+        description: customModelDescription,
       })),
     ]
   }

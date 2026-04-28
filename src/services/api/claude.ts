@@ -24,7 +24,10 @@ import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
 } from 'src/utils/model/providers.js'
-import { readCustomApiStorage } from 'src/utils/customApiStorage.js'
+import {
+  readCustomApiProvidersStorage,
+  readCustomApiStorage,
+} from 'src/utils/customApiStorage.js'
 import {
   convertAnthropicRequestToGemini,
   createAnthropicStreamFromGemini,
@@ -99,6 +102,7 @@ import {
   stripToolReferenceBlocksFromUserMessage,
 } from '../../utils/messages.js'
 import {
+  getConfiguredProviderIdForModel,
   getDefaultOpusModel,
   getDefaultSonnetModel,
   getSmallFastModel,
@@ -179,7 +183,7 @@ import {
 } from 'src/utils/betas.js'
 import { CLAUDE_IN_CHROME_MCP_SERVER_NAME } from 'src/utils/claudeInChrome/common.js'
 import { CHROME_TOOL_SEARCH_INSTRUCTIONS } from 'src/utils/claudeInChrome/prompt.js'
-import { getMaxThinkingTokensForModel } from 'src/utils/context.js'
+import { CAPPED_DEFAULT_MAX_TOKENS, getMaxThinkingTokensForModel } from 'src/utils/context.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { logForDiagnosticsNoPII } from 'src/utils/diagLogs.js'
 import { type EffortValue, modelSupportsEffort } from 'src/utils/effort.js'
@@ -858,7 +862,7 @@ export async function* executeNonStreamingRequest(
 
       const adjustedParams = adjustParamsForNonStreaming(
         retryParams,
-        MAX_NON_STREAMING_TOKENS,
+        clientOptions.model,
       )
 
       try {
@@ -1821,12 +1825,20 @@ async function* queryModel(
         // BetaMessageStream calls partialParse() on every input_json_delta, which we don't need
         // since we handle tool input accumulation ourselves
         // biome-ignore lint/plugin: main conversation loop handles attribution separately
-        const customApiConfig = {
-          ...(getGlobalConfig().customApiEndpoint ?? {}),
-          ...readCustomApiStorage(),
-        }
+        const configuredProviderId = getConfiguredProviderIdForModel(params.model)
+        const configuredProvider = configuredProviderId
+          ? readCustomApiProvidersStorage().providers?.find(
+              provider => provider.id === configuredProviderId,
+            )
+          : undefined
+        const customApiConfig = configuredProvider ?? readCustomApiStorage()
         const compatProvider = customApiConfig.provider ?? 'anthropic'
         const openAICompatMode = customApiConfig.openaiCompatMode ?? 'chat_completions'
+
+        // OpenAI-compatible APIs (DeepSeek, etc.) have max_tokens limits (typically 8192).
+        // Cap max_tokens to prevent "max_tokens value out of range" errors.
+        const maxTokensForCompat = Math.min(params.max_tokens ?? CAPPED_DEFAULT_MAX_TOKENS, 8192)
+
         if (compatProvider === 'gemini') {
           const geminiRequest = convertAnthropicRequestToGemini({
             model: params.model,
@@ -1835,7 +1847,7 @@ async function* queryModel(
             tools: params.tools,
             tool_choice: params.tool_choice,
             temperature: params.temperature,
-            max_tokens: params.max_tokens,
+            max_tokens: maxTokensForCompat,
             thinking: params.thinking,
             effort,
           })
@@ -1846,14 +1858,14 @@ async function* queryModel(
           }
           const reader = await createGeminiCompatStream(
             {
-              apiKey: process.env.DOGE_API_KEY || '',
-              baseURL: process.env.ANTHROPIC_BASE_URL || '',
+              apiKey: customApiConfig.apiKey || process.env.DOGE_API_KEY || '',
+              baseURL: customApiConfig.baseURL || process.env.ANTHROPIC_BASE_URL || '',
               headers: clientRequestId
                 ? { [CLIENT_REQUEST_ID_HEADER]: clientRequestId }
                 : undefined,
               fetch: globalThis.fetch,
             },
-            process.env.ANTHROPIC_MODEL?.trim() || params.model,
+            customApiConfig.model?.trim() || params.model,
             geminiRequest,
             signal,
           )
@@ -1865,8 +1877,8 @@ async function* queryModel(
         }
         if (compatProvider === 'openai') {
           const compatConfig = {
-            apiKey: process.env.DOGE_API_KEY || '',
-            baseURL: process.env.ANTHROPIC_BASE_URL || '',
+            apiKey: customApiConfig.apiKey || process.env.DOGE_API_KEY || '',
+            baseURL: customApiConfig.baseURL || process.env.ANTHROPIC_BASE_URL || '',
             headers: clientRequestId
               ? { [CLIENT_REQUEST_ID_HEADER]: clientRequestId }
               : undefined,
@@ -1881,7 +1893,7 @@ async function* queryModel(
               tools: params.tools,
               tool_choice: params.tool_choice,
               temperature: params.temperature,
-              max_tokens: params.max_tokens,
+              max_tokens: maxTokensForCompat,
               thinking: params.thinking,
               effort,
             })
@@ -1909,7 +1921,7 @@ async function* queryModel(
             tools: params.tools,
             tool_choice: params.tool_choice,
             temperature: params.temperature,
-            max_tokens: params.max_tokens,
+            max_tokens: maxTokensForCompat,
             thinking: params.thinking,
           })
           if (!openAIRequest.messages || openAIRequest.messages.length === 0) {
@@ -3479,12 +3491,17 @@ export async function queryWithModel({
 // bypass it by setting a client-level timeout, so we can cap higher.
 export const MAX_NON_STREAMING_TOKENS = 64_000
 
+function isMaxTokensCapEnabled(): boolean {
+  // 3P default: false (not validated on Bedrock/Vertex)
+  return getFeatureValue_CACHED_MAY_BE_STALE('tengu_otk_slot_v1', false)
+}
+
 /**
  * Adjusts thinking budget when max_tokens is capped for non-streaming fallback.
  * Ensures the API constraint: max_tokens > thinking.budget_tokens
  *
  * @param params - The parameters that will be sent to the API
- * @param maxTokensCap - The maximum allowed tokens (MAX_NON_STREAMING_TOKENS)
+ * @param model - The model name to determine max tokens cap
  * @returns Adjusted parameters with thinking budget capped if needed
  */
 export function adjustParamsForNonStreaming<
@@ -3492,8 +3509,9 @@ export function adjustParamsForNonStreaming<
     max_tokens: number
     thinking?: BetaMessageStreamParams['thinking']
   },
->(params: T, maxTokensCap: number): T {
-  const cappedMaxTokens = Math.min(params.max_tokens, maxTokensCap)
+>(params: T, model: string): T {
+  const cap = getModelMaxOutputTokens(model).default
+  const cappedMaxTokens = Math.min(params.max_tokens, cap)
 
   // Adjust thinking budget if it would exceed capped max_tokens
   // to maintain the constraint: max_tokens > thinking.budget_tokens
@@ -3515,11 +3533,6 @@ export function adjustParamsForNonStreaming<
     ...adjustedParams,
     max_tokens: cappedMaxTokens,
   }
-}
-
-function isMaxTokensCapEnabled(): boolean {
-  // 3P default: false (not validated on Bedrock/Vertex)
-  return getFeatureValue_CACHED_MAY_BE_STALE('tengu_otk_slot_v1', false)
 }
 
 export function getMaxOutputTokensForModel(model: string): number {
