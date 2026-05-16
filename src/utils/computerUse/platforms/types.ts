@@ -28,6 +28,8 @@ export interface DisplayInfo {
   height: number
   scaleFactor: number
   displayId: number
+  originX?: number
+  originY?: number
 }
 
 export interface InstalledApp {

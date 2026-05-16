@@ -67,6 +67,39 @@ function computeTargetDims(
   return targetImageSize(physW, physH, API_RESIZE_PARAMS)
 }
 
+function normalizeDisplayGeometry(display: Partial<DisplayGeometry> & {
+  width: number
+  height: number
+  scaleFactor?: number
+  displayId?: number
+}): DisplayGeometry {
+  return {
+    width: display.width,
+    height: display.height,
+    scaleFactor: display.scaleFactor ?? 1,
+    displayId: display.displayId ?? 0,
+    originX: display.originX ?? 0,
+    originY: display.originY ?? 0,
+  }
+}
+
+function normalizeScreenshotResult(
+  raw: Partial<ScreenshotResult> & { base64: string; width: number; height: number },
+  display: DisplayGeometry,
+  displayId?: number,
+): ScreenshotResult {
+  return {
+    base64: raw.base64,
+    width: raw.width,
+    height: raw.height,
+    displayWidth: raw.displayWidth ?? display.width,
+    displayHeight: raw.displayHeight ?? display.height,
+    originX: raw.originX ?? display.originX,
+    originY: raw.originY ?? display.originY,
+    displayId: raw.displayId ?? displayId ?? display.displayId,
+  }
+}
+
 async function readClipboardViaPbpaste(): Promise<string> {
   if (process.platform === 'win32') {
     const { stdout, code } = await execFileNoThrow('powershell', ['-NoProfile', '-Command', 'Get-Clipboard'], {
@@ -336,9 +369,9 @@ export function createCliExecutor(opts: {
     display: {
       getSize: (displayId?: number) => {
         const d = platform!.display.getSize(displayId)
-        return { ...d, scaleFactor: d.scaleFactor ?? 1, displayId: d.displayId ?? 0 }
+        return normalizeDisplayGeometry(d)
       },
-      listAll: () => platform!.display.listAll(),
+      listAll: () => platform!.display.listAll().map(normalizeDisplayGeometry),
     },
     screenshot: {
       captureExcluding: async (...args: any[]) => platform!.screenshot.captureScreen(args[4]),
@@ -349,8 +382,12 @@ export function createCliExecutor(opts: {
       _allowed: string[], _host: string, _q: number,
       targetW: number, targetH: number, displayId?: number,
     ) => {
+      const d = normalizeDisplayGeometry(platform!.display.getSize(displayId))
       const shot = await platform!.screenshot.captureScreen(displayId)
-      return { ...shot, hidden: [] as string[], displayId: displayId ?? 0 }
+      return {
+        ...normalizeScreenshotResult(shot, d, displayId),
+        hidden: [] as string[],
+      }
     },
   }
 
@@ -498,9 +535,8 @@ export function createCliExecutor(opts: {
       // macOS native returns these from Swift; our cross-platform ComputerUseAPI
       // returns {base64, width, height} — fill in the missing fields.
       return {
-        ...raw,
+        ...normalizeScreenshotResult(raw, d, opts.preferredDisplayId),
         hidden: (raw as any).hidden ?? [],
-        displayId: (raw as any).displayId ?? opts.preferredDisplayId ?? d.displayId,
       }
     },
 
@@ -519,7 +555,7 @@ export function createCliExecutor(opts: {
         d.height,
         d.scaleFactor,
       )
-      return drainRunLoop(() =>
+      const raw = await drainRunLoop(() =>
         cu.screenshot.captureExcluding(
           withoutTerminal(opts.allowedBundleIds),
           SCREENSHOT_JPEG_QUALITY,
@@ -528,6 +564,7 @@ export function createCliExecutor(opts: {
           opts.displayId,
         ),
       )
+      return normalizeScreenshotResult(raw, d, opts.displayId)
     },
 
     async zoom(

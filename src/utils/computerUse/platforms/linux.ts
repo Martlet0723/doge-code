@@ -3,7 +3,7 @@
  *
  * Uses:
  * - xdotool for mouse/keyboard input
- * - scrot for screenshots (converted to JPEG)
+ * - scrot / spectacle for screenshots (converted to JPEG)
  * - xrandr for display enumeration
  * - wmctrl for window management
  *
@@ -33,16 +33,45 @@ function run(cmd: string[]): string {
   return new TextDecoder().decode(result.stdout).trim()
 }
 
-async function runAsync(cmd: string[]): Promise<string> {
-  const proc = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'pipe' })
-  const out = await new Response(proc.stdout).text()
-  await proc.exited
+const COMMAND_TIMEOUT_MS = 10_000
+
+async function runAsync(cmd: string[], timeoutMs = COMMAND_TIMEOUT_MS): Promise<string> {
+  const proc = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'ignore' })
+  const completed = Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ] as const)
+
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<null>(resolve => {
+    timer = setTimeout(() => resolve(null), timeoutMs)
+    timer.unref?.()
+  })
+
+  const result = await Promise.race([completed, timedOut])
+  if (timer) clearTimeout(timer)
+
+  if (result === null) {
+    try { proc.kill('SIGKILL') } catch {}
+    await proc.exited.catch(() => {})
+    throw new Error(`Command timed out after ${timeoutMs}ms: ${cmd.join(' ')}`)
+  }
+
+  const [out, exitCode] = result
+  if (exitCode !== 0) {
+    throw new Error(`Command failed with exit code ${exitCode}: ${cmd.join(' ')}`)
+  }
+
   return out.trim()
 }
 
 function commandExists(name: string): boolean {
   const result = Bun.spawnSync({ cmd: ['which', name], stdout: 'pipe', stderr: 'pipe' })
   return result.exitCode === 0
+}
+
+function isWayland(): boolean {
+  return process.env.XDG_SESSION_TYPE === 'wayland'
 }
 
 // ---------------------------------------------------------------------------
@@ -147,14 +176,62 @@ const input: InputPlatform = {
 }
 
 // ---------------------------------------------------------------------------
-// Screenshot — scrot → JPEG conversion
+// Screenshot — scrot/spectacle → JPEG conversion
 // ---------------------------------------------------------------------------
 
 const SCREENSHOT_TMP = '/tmp/cu-screenshot-tmp.png'
+const SCREENSHOT_CROP_TMP = '/tmp/cu-screenshot-crop.png'
 const SCREENSHOT_JPG = '/tmp/cu-screenshot.jpg'
 
+async function waitForFile(path: string, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const file = Bun.file(path)
+    if (await file.exists()) {
+      if (file.size > 0) return
+    }
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new Error(`Timed out waiting for file: ${path}`)
+}
+
+async function cropPng(sourcePath: string, outputPath: string, x: number, y: number, w: number, h: number): Promise<void> {
+  if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) {
+    throw new Error(`Invalid crop region: ${x},${y},${w},${h}`)
+  }
+
+  const geometry = `${Math.round(w)}x${Math.round(h)}+${Math.round(x)}+${Math.round(y)}`
+
+  if (commandExists('magick')) {
+    await runAsync(['magick', sourcePath, '-crop', geometry, '+repage', outputPath])
+  } else if (commandExists('convert')) {
+    await runAsync(['convert', sourcePath, '-crop', geometry, '+repage', outputPath])
+  } else if (commandExists('ffmpeg')) {
+    await runAsync([
+      'ffmpeg',
+      '-y',
+      '-i',
+      sourcePath,
+      '-filter:v',
+      `crop=${Math.round(w)}:${Math.round(h)}:${Math.round(x)}:${Math.round(y)}`,
+      outputPath,
+    ])
+  } else {
+    throw new Error('No image crop tool found')
+  }
+
+  await waitForFile(outputPath)
+}
+
 async function pngToJpegBase64(pngPath: string, width: number, height: number): Promise<ScreenshotResult> {
-  // Try ImageMagick convert first
+  // Try ImageMagick first
+  if (commandExists('magick')) {
+    await runAsync(['magick', pngPath, '-quality', '75', SCREENSHOT_JPG])
+    const file = Bun.file(SCREENSHOT_JPG)
+    const buffer = await file.arrayBuffer()
+    return { base64: Buffer.from(buffer).toString('base64'), width, height }
+  }
+
   if (commandExists('convert')) {
     await runAsync(['convert', pngPath, '-quality', '75', SCREENSHOT_JPG])
     const file = Bun.file(SCREENSHOT_JPG)
@@ -179,7 +256,12 @@ async function pngToJpegBase64(pngPath: string, width: number, height: number): 
 const screenshot: ScreenshotPlatform = {
   async captureScreen(displayId) {
     try {
-      await runAsync(['scrot', '-o', SCREENSHOT_TMP])
+      if (isWayland() && commandExists('spectacle')) {
+        await runAsync(['spectacle', '-b', '-n', '-o', SCREENSHOT_TMP])
+      } else {
+        await runAsync(['scrot', '-o', SCREENSHOT_TMP])
+      }
+      await waitForFile(SCREENSHOT_TMP)
       const size = display.getSize(displayId)
       return pngToJpegBase64(SCREENSHOT_TMP, size.width, size.height)
     } catch {
@@ -189,8 +271,17 @@ const screenshot: ScreenshotPlatform = {
 
   async captureRegion(x, y, w, h) {
     try {
-      await runAsync(['scrot', '-a', `${x},${y},${w},${h}`, '-o', SCREENSHOT_TMP])
-      return pngToJpegBase64(SCREENSHOT_TMP, w, h)
+      let pngPath = SCREENSHOT_TMP
+      if (isWayland() && commandExists('spectacle')) {
+        await runAsync(['spectacle', '-b', '-n', '-o', SCREENSHOT_TMP])
+        await waitForFile(SCREENSHOT_TMP)
+        await cropPng(SCREENSHOT_TMP, SCREENSHOT_CROP_TMP, x, y, w, h)
+        pngPath = SCREENSHOT_CROP_TMP
+      } else {
+        await runAsync(['scrot', '-a', `${x},${y},${w},${h}`, '-o', SCREENSHOT_TMP])
+        await waitForFile(SCREENSHOT_TMP)
+      }
+      return pngToJpegBase64(pngPath, w, h)
     } catch {
       return { base64: '', width: w, height: h }
     }
@@ -232,23 +323,25 @@ const display: DisplayPlatform = {
       const displays: DisplayInfo[] = []
       let idx = 0
 
-      const regex = /^\S+\s+connected\s+(?:primary\s+)?(\d+)x(\d+)\+\d+\+\d+/gm
+      const regex = /^\S+\s+connected\s+(?:primary\s+)?(\d+)x(\d+)\+(-?\d+)\+(-?\d+)/gm
       let match: RegExpExecArray | null
       while ((match = regex.exec(raw)) !== null) {
         displays.push({
           width: Number(match[1]),
           height: Number(match[2]),
+          originX: Number(match[3]),
+          originY: Number(match[4]),
           scaleFactor: 1,
           displayId: idx++,
         })
       }
 
       if (displays.length === 0) {
-        return [{ width: 1920, height: 1080, scaleFactor: 1, displayId: 0 }]
+        return [{ width: 1920, height: 1080, originX: 0, originY: 0, scaleFactor: 1, displayId: 0 }]
       }
       return displays
     } catch {
-      return [{ width: 1920, height: 1080, scaleFactor: 1, displayId: 0 }]
+      return [{ width: 1920, height: 1080, originX: 0, originY: 0, scaleFactor: 1, displayId: 0 }]
     }
   },
 
@@ -258,7 +351,7 @@ const display: DisplayPlatform = {
       const found = all.find(d => d.displayId === displayId)
       if (found) return found
     }
-    return all[0] ?? { width: 1920, height: 1080, scaleFactor: 1, displayId: 0 }
+    return all[0] ?? { width: 1920, height: 1080, originX: 0, originY: 0, scaleFactor: 1, displayId: 0 }
   },
 }
 

@@ -389,22 +389,24 @@ Add-Type -AssemblyName System.Windows.Forms
 $result = @()
 $idx = 0
 foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
-  $result += "$($s.Bounds.Width),$($s.Bounds.Height),$idx,$($s.Primary)"
+  $result += "$($s.Bounds.Width),$($s.Bounds.Height),$idx,$($s.Bounds.X),$($s.Bounds.Y),$($s.Primary)"
   $idx++
 }
 $result -join "|"
 `)
       return raw.split('|').filter(Boolean).map(entry => {
-        const [w, h, id] = entry.split(',')
+        const [w, h, id, x, y] = entry.split(',')
         return {
           width: Number(w),
           height: Number(h),
+          originX: Number(x),
+          originY: Number(y),
           scaleFactor: 1,
           displayId: Number(id),
         }
       })
     } catch {
-      return [{ width: 1920, height: 1080, scaleFactor: 1, displayId: 0 }]
+      return [{ width: 1920, height: 1080, originX: 0, originY: 0, scaleFactor: 1, displayId: 0 }]
     }
   },
 
@@ -414,7 +416,7 @@ $result -join "|"
       const found = all.find(d => d.displayId === displayId)
       if (found) return found
     }
-    return all[0] ?? { width: 1920, height: 1080, scaleFactor: 1, displayId: 0 }
+    return all[0] ?? { width: 1920, height: 1080, originX: 0, originY: 0, scaleFactor: 1, displayId: 0 }
   },
 }
 
