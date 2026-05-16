@@ -454,14 +454,66 @@ const apps: AppsPlatform = {
   },
 
   async open(name) {
-    try {
-      const desktopName = name.endsWith('.desktop') ? name : `${name}.desktop`
-      if (commandExists('gtk-launch')) {
-        await runAsync(['gtk-launch', desktopName])
-        return
+    const desktopName = name.endsWith('.desktop') ? name : `${name}.desktop`
+    // 1) gtk-launch (the canonical Linux app launcher)
+    if (commandExists('gtk-launch')) {
+      // Don't use runAsync here — gtk-launch may keep stdout open if the
+      // launched GUI app inherits the pipe, causing a spurious timeout.
+      try {
+        const proc = Bun.spawn(['gtk-launch', desktopName], {
+          stdout: 'ignore',
+          stderr: 'ignore',
+        })
+        const exited = await Promise.race([
+          proc.exited.then(code => code),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 5_000)),
+        ])
+        if (exited === 0 || exited === null) return
+        console.warn(`gtk-launch "${desktopName}" exited with code ${exited}, trying Exec fallback`)
+      } catch (e) {
+        console.warn(`gtk-launch "${desktopName}" failed (${e}), trying Exec fallback`)
       }
-    } catch { /* fall through */ }
-    await runAsync(['xdg-open', name])
+    }
+
+    // 2) Parse the desktop file and execute its Exec line directly.
+    //    xdg-open misinterprets app names as URLs (it opens a browser),
+    //    so we never call it here.
+    const desktopDirs = [
+      '/usr/share/applications',
+      '/usr/local/share/applications',
+      `${process.env.HOME}/.local/share/applications`,
+    ]
+    for (const dir of desktopDirs) {
+      try {
+        const content = run(['cat', `${dir}/${desktopName}`])
+        const execMatch = content.match(/^Exec=(.+)$/m)
+        if (!execMatch?.[1]) continue
+
+        // Strip XDG field codes (%f, %u, %F, %U, %d, %D, %n, %N, %i, %c, %k, %v, %m)
+        const execLine = execMatch[1].trim().replace(/\s*%[fFuUdDnNickvm]/g, '').trim()
+        if (!execLine) continue
+
+        // Respect the optional Path= key (working directory)
+        const pathMatch = content.match(/^Path=(.+)$/m)
+        const cwd = pathMatch?.[1]?.trim() || undefined
+
+        const proc = Bun.spawn(['sh', '-c', execLine], { cwd, stdout: 'ignore', stderr: 'ignore' })
+        // Brief grace period: if the command exits immediately with an error,
+        // try the next directory.  Otherwise assume it launched successfully.
+        const exited = await Promise.race([
+          proc.exited.then(code => code),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 1_000)),
+        ])
+        if (exited === 0 || exited === null) return
+        // exited with non-zero — try next dir
+      } catch {
+        // unreadable .desktop file — try next dir
+      }
+    }
+
+    throw new Error(
+      `Failed to open "${name}". gtk-launch unavailable/failed, and no valid desktop file found in ${desktopDirs.join(', ')}.`,
+    )
   },
 
   getFrontmostApp(): FrontmostAppInfo | null {
